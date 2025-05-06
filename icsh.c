@@ -14,20 +14,36 @@
 
 char **split_line(char *line);
 
+// for '!!' history
 char *last_line = NULL;
 
 int main(int argc, char *argv[]) {
+
+    // support reading from script file
+    FILE *input = stdin;
+    int script_mode = 0;
+    if (argc > 1) {
+        input = fopen(argv[1], "r"); // open script file
+        if (!input) {
+            perror("fopen");
+            exit(1);
+        }
+        script_mode = 1; // flag script mode
+    }
+
     char *line = NULL;
     size_t bufsize = 0;
     ssize_t linelen;
 
     while (1) {
-        printf("icsh $ ");
-        fflush(stdout);
+        if (!script_mode) {
+            printf("icsh $ ");
+            fflush(stdout);
+        }
 
-        linelen = getline(&line, &bufsize, stdin);
+        linelen = getline(&line, &bufsize, input);
         if (linelen == -1) {
-            printf("\n");
+            if (!script_mode) printf("\n");
             break;
         }
 
@@ -36,9 +52,11 @@ int main(int argc, char *argv[]) {
             linelen--;
         }
 
+        // history: '!!'
         if (strcmp(line, "!!") == 0) {
             if (last_line) {
-                printf("%s\n", last_line);
+                // echo history only in interactive mode
+                if (!script_mode) printf("%s\n", last_line);
                 free(line);
                 line = strdup(last_line);
                 linelen = strlen(line);
@@ -56,15 +74,15 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // built-ins
         if (strcmp(args[0], "exit") == 0) {
-            int status = 0;
-            if (args[1]) {
-                status = atoi(args[1]) & 0xFF;
-            }
-            printf("bye\n");
+            int status = args[1] ? atoi(args[1]) & 0xFF : 0;
+            //suppress goodbye in script mode
+            if (!script_mode) printf("bye\n");
             free(args);
             free(line);
             free(last_line);
+            if (script_mode) fclose(input); // close script file
             exit(status);
         }
         else if (strcmp(args[0], "cd") == 0) {
@@ -98,9 +116,12 @@ int main(int argc, char *argv[]) {
 
     free(line);
     free(last_line);
+    // ensure file closed if in script mode
+    if (script_mode) fclose(input);
     return 0;
 }
 
+// split input into tokens
 char **split_line(char *line) {
     int bufsize = TOK_BUFSIZE, pos = 0;
     char **tokens = malloc(bufsize * sizeof(char*));
