@@ -1,2 +1,4 @@
 *.dSYM/
 icsh
+.DS_Store
+.vscode/

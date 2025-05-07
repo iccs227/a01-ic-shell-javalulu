@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #define TOK_BUFSIZE 64
 #define TOK_DELIM " \t\r\n"
@@ -108,7 +110,17 @@ int main(int argc, char *argv[]) {
         }
 
         else {
-            printf("Bad Command\n");
+            pid_t pid = fork();                  // create child process
+            if (pid < 0) {
+                perror("fork");
+            } else if (pid == 0) {
+                execvp(args[0], args);           // replace child with program
+                perror("execvp");              // exec failed
+                exit(1);                         // exit child on failure
+            } else {
+                int wstatus;
+                waitpid(pid, &wstatus, 0);       // wait for child to finish
+            }
         }
 
         free(args);
