@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h> 
 
 #define TOK_BUFSIZE 64
 #define TOK_DELIM " \t\r\n"
@@ -19,7 +20,31 @@ char **split_line(char *line);
 // for '!!' history
 char *last_line = NULL;
 
+static pid_t fg_pid = 0;        // foreground process ID
+static int last_exit = 0;        // last command exit status
+
+// SIGINT handler to kill foreground job
+void handle_sigint(int sig) {
+    if (fg_pid > 0) kill(fg_pid, SIGINT);
+}
+
+// SIGTSTP handler to suspend foreground job
+void handle_sigtstp(int sig) {
+    if (fg_pid > 0) kill(fg_pid, SIGTSTP);
+}
+
 int main(int argc, char *argv[]) {
+    // Added: install signal handlers
+    struct sigaction sa_int, sa_tstp;
+    sigemptyset(&sa_int.sa_mask);
+    sa_int.sa_handler = handle_sigint;
+    sa_int.sa_flags = SA_RESTART;
+    sigaction(SIGINT, &sa_int, NULL);
+
+    sigemptyset(&sa_tstp.sa_mask);
+    sa_tstp.sa_handler = handle_sigtstp;
+    sa_tstp.sa_flags = SA_RESTART;
+    sigaction(SIGTSTP, &sa_tstp, NULL);
 
     // support reading from script file
     FILE *input = stdin;
@@ -92,14 +117,21 @@ int main(int argc, char *argv[]) {
             if (chdir(dir) != 0) {
                 perror("cd");
             }
+            last_exit = 0;
         }
         else if (strcmp(args[0], "help") == 0) {
             printf("ICShell built-in commands：\n");
             printf("  echo <text>\n");
+            printf("  echo $?\n");
             printf("  !!\n");
             printf("  exit [n]\n");
             printf("  cd [dir]\n");
             printf("  help\n");
+            last_exit = 0;
+        }
+        else if (strcmp(args[0], "echo") == 0 && args[1] && strcmp(args[1], "$?") == 0 && args[2] == NULL) {
+            printf("%d\n", last_exit);
+            last_exit = 0;
         }
         else if (strcmp(args[0], "echo") == 0) {
             for (int i = 1; args[i]; i++) {
@@ -107,19 +139,30 @@ int main(int argc, char *argv[]) {
                 if (args[i+1]) putchar(' ');
             }
             putchar('\n');
+            last_exit = 0;
         }
-
+        // external command execution
         else {
             pid_t pid = fork();                  // create child process
             if (pid < 0) {
                 perror("fork");
+                last_exit = 1;
             } else if (pid == 0) {
+                // restore default signals in child
+                signal(SIGINT, SIG_DFL);
+                signal(SIGTSTP, SIG_DFL);
+
                 execvp(args[0], args);           // replace child with program
                 perror("execvp");              // exec failed
                 exit(1);                         // exit child on failure
             } else {
+                fg_pid = pid;  // track fg PID
                 int wstatus;
-                waitpid(pid, &wstatus, 0);       // wait for child to finish
+                waitpid(pid, &wstatus, WUNTRACED);       // wait for child to finish
+                if (WIFEXITED(wstatus)) last_exit = WEXITSTATUS(wstatus);
+                else if (WIFSIGNALED(wstatus)) last_exit = 128 + WTERMSIG(wstatus);
+                else if (WIFSTOPPED(wstatus)) last_exit = 128 + WSTOPSIG(wstatus);
+                fg_pid = 0;
             }
         }
 
