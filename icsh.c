@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h> 
+#include <fcntl.h>
 
 #define TOK_BUFSIZE 64
 #define TOK_DELIM " \t\r\n"
@@ -34,7 +35,7 @@ void handle_sigtstp(int sig) {
 }
 
 int main(int argc, char *argv[]) {
-    // Added: install signal handlers
+    // install signal handlers
     struct sigaction sa_int, sa_tstp;
     sigemptyset(&sa_int.sa_mask);
     sa_int.sa_handler = handle_sigint;
@@ -101,6 +102,34 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // parse I/O redirection tokens
+        int infile = -1, outfile = -1;    // redirection file descriptors
+        for (int i = 0; args[i]; i++) {
+            if (strcmp(args[i], "<") == 0) {
+                // input redirection
+                if (args[i+1]) {
+                    infile = open(args[i+1], O_RDONLY);
+                    if (infile < 0) perror("open");
+                }
+                // remove '<' and filename from args
+                int j = i;
+                while (args[j+2]) { args[j] = args[j+2]; j++; }
+                args[j] = args[j+1] = NULL;
+                i--;
+            } else if (strcmp(args[i], ">") == 0) {
+                // output redirection
+                if (args[i+1]) {
+                    outfile = open(args[i+1], O_CREAT|O_WRONLY|O_TRUNC, 0644);
+                    if (outfile < 0) perror("open");
+                }
+                // remove '>' and filename
+                int j = i;
+                while (args[j+2]) { args[j] = args[j+2]; j++; }
+                args[j] = args[j+1] = NULL;
+                i--;
+            }
+        }
+
         // built-ins
         if (strcmp(args[0], "exit") == 0) {
             int status = args[1] ? atoi(args[1]) & 0xFF : 0;
@@ -134,11 +163,14 @@ int main(int argc, char *argv[]) {
             last_exit = 0;
         }
         else if (strcmp(args[0], "echo") == 0) {
+            int saved = -1;                                            // save STDOUT
+            if (outfile != -1) { saved = dup(STDOUT_FILENO); dup2(outfile, STDOUT_FILENO); }
             for (int i = 1; args[i]; i++) {
                 printf("%s", args[i]);
                 if (args[i+1]) putchar(' ');
             }
             putchar('\n');
+            if (saved != -1) { dup2(saved, STDOUT_FILENO); close(saved); } // restore STDOUT
             last_exit = 0;
         }
         // external command execution
@@ -152,6 +184,16 @@ int main(int argc, char *argv[]) {
                 signal(SIGINT, SIG_DFL);
                 signal(SIGTSTP, SIG_DFL);
 
+                // apply redirection in child
+                if (infile != -1) {
+                    dup2(infile, STDIN_FILENO);
+                    close(infile);
+                }
+                if (outfile != -1) {
+                    dup2(outfile, STDOUT_FILENO);
+                    close(outfile);
+                }
+
                 execvp(args[0], args);           // replace child with program
                 perror("execvp");              // exec failed
                 exit(1);                         // exit child on failure
@@ -159,6 +201,9 @@ int main(int argc, char *argv[]) {
                 fg_pid = pid;  // track fg PID
                 int wstatus;
                 waitpid(pid, &wstatus, WUNTRACED);       // wait for child to finish
+                // close fds in parent
+                if (infile != -1) close(infile);
+                if (outfile != -1) close(outfile);
                 if (WIFEXITED(wstatus)) last_exit = WEXITSTATUS(wstatus);
                 else if (WIFSIGNALED(wstatus)) last_exit = 128 + WTERMSIG(wstatus);
                 else if (WIFSTOPPED(wstatus)) last_exit = 128 + WSTOPSIG(wstatus);
