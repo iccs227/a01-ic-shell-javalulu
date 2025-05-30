@@ -1,4 +1,1 @@
-echo hello
-echo world
-!!
-exit 5
+"sleep 5"
