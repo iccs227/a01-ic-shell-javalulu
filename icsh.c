@@ -13,10 +13,19 @@
 #include <signal.h> 
 #include <fcntl.h>
 #include <errno.h>
+#include <readline/readline.h>
+#include <readline/history.h>
+#include <dirent.h>
 
 #define TOK_BUFSIZE 64
 #define TOK_DELIM " \t\r\n"
 #define MAX_JOBS 32
+
+// Function declarations for completion
+void initialize_readline(void);
+char *command_generator(const char *, int);
+char *filename_generator(const char *, int);
+char **icsh_completion(const char *, int, int);
 
 // Job status enum
 typedef enum {
@@ -244,6 +253,9 @@ int main(int argc, char *argv[]) {
     sa_chld.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction(SIGCHLD, &sa_chld, NULL);
 
+    // Initialize readline
+    initialize_readline();
+
     // support reading from script file
     FILE *input = stdin;
     if (argc > 1) {
@@ -262,24 +274,30 @@ int main(int argc, char *argv[]) {
     while (1) {
         if (!script_mode) {
             update_job_status();  // Update job status before showing prompt
-            printf("icsh $ ");
-            fflush(stdout);
-        }
-
-        linelen = getline(&line, &bufsize, input);
-        if (linelen == -1) {
-            if (!script_mode) printf("\n");
-            break;
-        }
-
-        // Ensure we have a newline after any background job completion messages
-        if (!script_mode) {
-            fflush(stdout);
-        }
-
-        if (line[linelen-1] == '\n') {
-            line[linelen-1] = '\0';
-            linelen--;
+            if (line) {
+                free(line);
+                line = NULL;
+            }
+            line = readline("icsh $ ");
+            if (!line) {  // EOF (Ctrl+D)
+                printf("\n");
+                break;
+            }
+            if (strlen(line) > 0) {
+                add_history(line);
+            }
+            linelen = strlen(line);
+        } else {
+            // Use getline for script mode
+            linelen = getline(&line, &bufsize, input);
+            if (linelen == -1) {
+                if (!script_mode) printf("\n");
+                break;
+            }
+            if (line[linelen-1] == '\n') {
+                line[linelen-1] = '\0';
+                linelen--;
+            }
         }
 
         // history: '!!'
@@ -641,4 +659,130 @@ void free_tokens(char **tokens) {
         free(tokens[i]);
     }
     free(tokens);
+}
+
+// Completion functions
+char *command_generator(const char *text, int state) {
+    static DIR *dir;
+    static struct dirent *entry;
+    static char *path;
+    static size_t text_len;
+
+    // If this is a new word to complete, initialize state
+    if (!state) {
+        if (dir) closedir(dir);
+        text_len = strlen(text);
+        path = getenv("PATH");
+        if (!path) return NULL;
+        
+        // Make a copy of PATH as strtok modifies the string
+        path = strdup(path);
+        if (!path) return NULL;
+        
+        char *dir_path = strtok(path, ":");
+        if (!dir_path) {
+            free(path);
+            return NULL;
+        }
+        
+        // Open the first directory in PATH
+        dir = opendir(dir_path);
+    }
+
+    // Iterate through PATH directories
+    while (1) {
+        if (!dir) {
+            char *next_dir = strtok(NULL, ":");
+            if (!next_dir) {
+                free(path);
+                return NULL;
+            }
+            dir = opendir(next_dir);
+            continue;
+        }
+
+        while ((entry = readdir(dir))) {
+            if (strncmp(entry->d_name, text, text_len) == 0) {
+                char *name = strdup(entry->d_name);
+                return name;
+            }
+        }
+
+        closedir(dir);
+        dir = NULL;
+    }
+}
+
+// Custom completion function that returns -1 for no match, 0 for single match, 1 for multiple matches
+static int custom_completion(const char *text, int state) {
+    char *name = filename_generator(text, state);
+    if (!name) return -1;
+    free(name);
+    return state == 0 ? 0 : 1;
+}
+
+char *filename_generator(const char *text, int state) {
+    static DIR *dir;
+    static struct dirent *entry;
+    static size_t text_len;
+    
+    // If this is a new word to complete, initialize state
+    if (!state) {
+        if (dir) closedir(dir);
+        dir = opendir(".");
+        if (!dir) return NULL;
+        text_len = strlen(text);
+    }
+
+    // Return the next name which matches
+    while ((entry = readdir(dir))) {
+        if (entry->d_name[0] == '.' && text[0] != '.') continue;
+        
+        if (strncmp(entry->d_name, text, text_len) == 0) {
+            char *name = strdup(entry->d_name);
+            // Add a slash if it's a directory
+            if (entry->d_type == DT_DIR) {
+                char *with_slash = malloc(strlen(name) + 2);
+                if (with_slash) {
+                    strcpy(with_slash, name);
+                    strcat(with_slash, "/");
+                    free(name);
+                    return with_slash;
+                }
+            }
+            return name;
+        }
+    }
+    
+    closedir(dir);
+    dir = NULL;
+    return NULL;
+}
+
+char **icsh_completion(const char *text, int start, int end) {
+    char **matches = NULL;
+
+    // If this word is at the start of the line, then it is a command
+    if (start == 0) {
+        matches = rl_completion_matches(text, command_generator);
+    } else {
+        matches = rl_completion_matches(text, filename_generator);
+    }
+
+    return matches;
+}
+
+// Initialize readline with our custom completion
+void initialize_readline(void) {
+    // Allow conditional parsing of ~/.inputrc
+    rl_readline_name = "icsh";
+
+    // Tell the completer that we want to try our own completion
+    rl_attempted_completion_function = icsh_completion;
+
+    // Use our custom completion function
+    rl_completion_entry_function = (int (*)(const char *, int))custom_completion;
+
+    // Don't use the default display matches function
+    rl_completion_display_matches_hook = NULL;
 }
